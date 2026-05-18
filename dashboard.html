@@ -785,7 +785,7 @@ function renderUpdateChip() {
   else if (state === 'downloading') { text = '↓ v' + version + ' · ' + (percent ?? 0) + '%'; cls += ' has-update'; title = 'Downloading update'; }
   else if (state === 'ready') { text = '↓ v' + version + ' ready — restart'; cls += ' ready'; title = 'Click to restart and install'; }
   else if (state === 'idle') text = 'v' + appVersion + ' · up to date';
-  else if (state === 'error') { text = 'v' + appVersion; title = 'Update check failed'; }
+  else if (state === 'error') { text = 'v' + appVersion + ' · check failed'; title = 'Update check failed: ' + (s.message || 'unknown'); }
   updateChip.textContent = text;
   updateChip.className = cls;
   updateChip.title = title;
@@ -806,7 +806,10 @@ updateChip.addEventListener('click', async () => {
   updateState = { state: 'checking' };
   renderUpdateChip();
   const r = await window.electronAPI?.checkForUpdates();
-  if (!r?.ok) { updateState = { state: 'idle' }; renderUpdateChip(); }
+  if (!r?.ok) {
+    updateState = { state: 'error', message: r?.error || 'unknown' };
+    renderUpdateChip();
+  }
 });
 renderUpdateChip();
 
