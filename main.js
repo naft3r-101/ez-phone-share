@@ -31,6 +31,7 @@ function saveConfig(cfg) {
 let mainWindow = null;
 let tray = null;
 let isQuitting = false;
+let pendingCloseChoice = false;
 
 function defaultMediaDir() {
   return path.join(app.getPath('pictures'), 'Ez Phone Share');
@@ -148,30 +149,15 @@ function createWindow() {
 
     const cfg = loadConfig();
     if (cfg.closeBehavior === 'minimize') { e.preventDefault(); mainWindow.hide(); return; }
-    if (cfg.closeBehavior === 'quit') { isQuitting = true; return; } // proceed to close
+    if (cfg.closeBehavior === 'quit') { isQuitting = true; return; }
 
     e.preventDefault();
-    dialog.showMessageBox(mainWindow, {
-      type: 'question',
-      title: APP_NAME,
-      message: 'Close window?',
-      detail: 'Minimize to tray to keep receiving uploads in the background, or quit the app entirely.',
-      buttons: ['Minimize to tray', 'Quit', 'Cancel'],
-      defaultId: 0,
-      cancelId: 2,
-      noLink: true,
-      checkboxLabel: 'Always do this — don\'t ask again',
-      checkboxChecked: false,
-    }).then(({ response, checkboxChecked }) => {
-      if (response === 2) return; // cancel
-      const choice = response === 0 ? 'minimize' : 'quit';
-      if (checkboxChecked) saveConfig({ ...loadConfig(), closeBehavior: choice });
-      if (choice === 'minimize') {
-        mainWindow.hide();
-      } else {
-        quitApp();
-      }
-    }).catch(() => { /* noop */ });
+    if (pendingCloseChoice) return; // modal is already up
+    pendingCloseChoice = true;
+    // Make sure window is visible so the modal isn't hidden
+    if (!mainWindow.isVisible()) mainWindow.show();
+    mainWindow.focus();
+    sendToWindow('close-prompt', {});
   });
   mainWindow.webContents.once('did-finish-load', () => {
     // Send current version to renderer
@@ -197,6 +183,17 @@ autoUpdater.on('update-available', (info) => sendToWindow('update-status', { sta
 autoUpdater.on('download-progress', (p) => sendToWindow('update-status', { state: 'downloading', percent: Math.round(p.percent), version: p.version }));
 autoUpdater.on('update-downloaded', (info) => sendToWindow('update-status', { state: 'ready', version: info.version }));
 autoUpdater.on('error', (e) => sendToWindow('update-status', { state: 'error', message: e.message }));
+
+ipcMain.handle('close-response', (_e, { choice, remember }) => {
+  pendingCloseChoice = false;
+  if (choice === 'cancel' || !choice) return;
+  if (remember) saveConfig({ ...loadConfig(), closeBehavior: choice });
+  if (choice === 'minimize') {
+    mainWindow.hide();
+  } else if (choice === 'quit') {
+    quitApp();
+  }
+});
 
 ipcMain.handle('update-check', async () => {
   if (!app.isPackaged) return { ok: false, error: 'dev mode' };

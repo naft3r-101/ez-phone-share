@@ -493,6 +493,132 @@
   .skeleton { background: linear-gradient(90deg, var(--surface) 0%, var(--surface-2) 50%, var(--surface) 100%); background-size: 200% 100%; animation: shimmer 1.4s infinite; border-radius: 12px; }
   @keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 
+  /* ============ MODAL ============ */
+  .backdrop {
+    position: fixed; inset: 0;
+    background: rgba(8, 9, 12, 0.62);
+    -webkit-backdrop-filter: blur(8px) saturate(0.85);
+    backdrop-filter: blur(8px) saturate(0.85);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 2000;
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.18s ease;
+  }
+  .backdrop.show { opacity: 1; pointer-events: auto; }
+
+  .modal {
+    width: min(460px, calc(100% - 40px));
+    background: linear-gradient(180deg, var(--surface) 0%, var(--bg-soft) 100%);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 26px 26px 18px;
+    box-shadow: 0 28px 70px rgba(0,0,0,0.55), 0 0 0 1px rgba(232, 169, 72, 0.04);
+    transform: translateY(8px) scale(0.97);
+    opacity: 0;
+    transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s;
+  }
+  .backdrop.show .modal { transform: none; opacity: 1; }
+
+  .modal::before {
+    content: '';
+    display: block; width: 28px; height: 2px;
+    background: var(--amber);
+    border-radius: 1px;
+    margin: 0 0 16px;
+    opacity: 0.85;
+  }
+  .modal h2 {
+    margin: 0 0 6px;
+    font-family: 'Fraunces', serif;
+    font-variation-settings: 'opsz' 144, 'SOFT' 30;
+    font-weight: 400;
+    font-size: 23px;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+  }
+  .modal .lead {
+    margin: 0 0 20px;
+    font-size: 13px; line-height: 1.55;
+    color: var(--ink-muted);
+  }
+  .modal .options { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+  .modal .opt {
+    background: var(--bg);
+    border: 1px solid var(--line);
+    color: var(--ink);
+    padding: 13px 16px;
+    border-radius: 11px;
+    cursor: pointer;
+    font-family: inherit; font-size: 13px;
+    display: flex; align-items: center; justify-content: space-between;
+    text-align: left; gap: 14px;
+    transition: border-color 0.15s, background 0.15s, transform 0.1s;
+  }
+  .modal .opt:hover { border-color: var(--amber-dim); background: rgba(232, 169, 72, 0.04); }
+  .modal .opt:active { transform: scale(0.99); }
+  .modal .opt:focus-visible { outline: none; border-color: var(--amber); box-shadow: 0 0 0 3px rgba(232,169,72,0.18); }
+  .modal .opt .label { display: flex; align-items: center; gap: 10px; }
+  .modal .opt .glyph { width: 22px; opacity: 0.8; color: var(--ink-muted); display: flex; align-items: center; justify-content: center; }
+  .modal .opt .glyph svg { width: 16px; height: 16px; }
+  .modal .opt.primary {
+    background: var(--amber); color: #1a140a; border-color: var(--amber);
+    font-weight: 500;
+  }
+  .modal .opt.primary:hover { background: #f0b758; border-color: #f0b758; }
+  .modal .opt.primary .glyph { color: #1a140a; opacity: 1; }
+  .modal .opt .kbd {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px;
+    padding: 2px 6px; border-radius: 4px;
+    background: rgba(0,0,0,0.28); color: var(--ink-muted);
+    border: 1px solid rgba(255,255,255,0.04);
+    letter-spacing: 0.04em;
+  }
+  .modal .opt.primary .kbd { background: rgba(0,0,0,0.18); color: rgba(26,20,10,0.7); border-color: rgba(0,0,0,0.08); }
+
+  .modal .foot {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; padding-top: 14px;
+    border-top: 1px solid var(--line);
+  }
+  .modal .check {
+    display: flex; align-items: center; gap: 9px;
+    font-size: 12px; color: var(--ink-muted);
+    cursor: pointer; user-select: none;
+    padding: 4px 2px;
+  }
+  .modal .check input {
+    appearance: none; -webkit-appearance: none;
+    width: 14px; height: 14px; border-radius: 4px;
+    border: 1px solid var(--line);
+    background: var(--bg);
+    cursor: pointer;
+    position: relative;
+    transition: all 0.12s;
+  }
+  .modal .check input:checked {
+    background: var(--amber); border-color: var(--amber);
+  }
+  .modal .check input:checked::after {
+    content: '✓'; position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    color: #1a140a; font-size: 10px; font-weight: 700;
+  }
+  .modal .cancel {
+    background: transparent; border: 0;
+    color: var(--ink-muted);
+    font-family: inherit; font-size: 12px;
+    padding: 6px 12px; border-radius: 6px;
+    cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .modal .cancel:hover { color: var(--ink); }
+  .modal .cancel .kbd {
+    font-family: 'JetBrains Mono', monospace; font-size: 9.5px;
+    padding: 1px 5px; border-radius: 3px;
+    background: rgba(255,255,255,0.04); border: 1px solid var(--line);
+    color: var(--ink-dim);
+  }
+
   /* Reveal animation for left column */
   aside > * { animation: fadeUp 0.5s cubic-bezier(0.16, 1, 0.3, 1) both; }
   aside > *:nth-child(1) { animation-delay: 0.05s; }
@@ -589,6 +715,36 @@
       <p>Scan the QR with your iPhone camera, take a photo, and it'll land right here.</p>
     </div>
   </main>
+</div>
+
+<div id="close-modal" class="backdrop" role="dialog" aria-modal="true" aria-labelledby="close-modal-title">
+  <div class="modal">
+    <h2 id="close-modal-title">Close window</h2>
+    <p class="lead">Minimize to tray to keep receiving uploads in the background, or quit the app entirely.</p>
+    <div class="options">
+      <button class="opt primary" data-choice="minimize" type="button">
+        <span class="label">
+          <span class="glyph"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 11h10"/><path d="M5 7l3 3 3-3"/><path d="M8 2v8"/></svg></span>
+          Minimize to tray
+        </span>
+        <span class="kbd">↵ Enter</span>
+      </button>
+      <button class="opt" data-choice="quit" type="button">
+        <span class="label">
+          <span class="glyph"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M11 4l-7 7m0-7l7 7"/></svg></span>
+          Quit application
+        </span>
+        <span class="kbd">Q</span>
+      </button>
+    </div>
+    <div class="foot">
+      <label class="check">
+        <input type="checkbox" id="close-remember">
+        <span>Always do this — don't ask again</span>
+      </label>
+      <button class="cancel" data-choice="cancel" type="button">Cancel <span class="kbd">Esc</span></button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -812,6 +968,40 @@ updateChip.addEventListener('click', async () => {
   }
 });
 renderUpdateChip();
+
+// ============ CLOSE MODAL ============
+const closeModal = document.getElementById('close-modal');
+const closeRemember = document.getElementById('close-remember');
+
+function showCloseModal() {
+  closeRemember.checked = false;
+  closeModal.classList.add('show');
+  setTimeout(() => closeModal.querySelector('.opt.primary')?.focus(), 30);
+}
+function hideCloseModal() { closeModal.classList.remove('show'); }
+
+function respondToClose(choice) {
+  const remember = closeRemember.checked;
+  hideCloseModal();
+  window.electronAPI?.sendCloseResponse(choice, remember);
+}
+
+closeModal.addEventListener('click', (e) => {
+  if (e.target === closeModal) { respondToClose('cancel'); return; }
+  const btn = e.target.closest('[data-choice]');
+  if (btn) respondToClose(btn.dataset.choice);
+});
+
+document.addEventListener('keydown', (e) => {
+  if (!closeModal.classList.contains('show')) return;
+  if (e.key === 'Escape') { e.preventDefault(); respondToClose('cancel'); }
+  else if (e.key === 'Enter') { e.preventDefault(); respondToClose('minimize'); }
+  else if (e.key === 'q' || e.key === 'Q') { e.preventDefault(); respondToClose('quit'); }
+});
+
+if (window.electronAPI?.onClosePrompt) {
+  window.electronAPI.onClosePrompt(() => showCloseModal());
+}
 
 document.getElementById('copy-url').addEventListener('click', async () => {
   const url = document.getElementById('url').textContent;

@@ -9,5 +9,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   installUpdate: () => ipcRenderer.invoke('update-install'),
   onUpdateStatus: (cb) => ipcRenderer.on('update-status', (_e, data) => cb(data)),
   onAppMeta: (cb) => ipcRenderer.on('app-meta', (_e, data) => cb(data)),
+  onClosePrompt: (cb) => ipcRenderer.on('close-prompt', () => cb()),
+  sendCloseResponse: (choice, remember) => ipcRenderer.invoke('close-response', { choice, remember }),
   isElectron: true,
 });
