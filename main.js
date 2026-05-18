@@ -2,6 +2,11 @@ const { app, BrowserWindow, Tray, Menu, ipcMain, dialog, shell, nativeImage } = 
 const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
+
+const APP_NAME = 'Ez Phone Share';
+app.setName(APP_NAME);
+if (process.platform === 'win32') app.setAppUserModelId('com.naft3r.ezphoneshare');
+
 const server = require('./server');
 
 autoUpdater.autoDownload = true;
@@ -57,38 +62,55 @@ async function ensureMediaDir() {
 }
 
 function createTray() {
-  // Use the app's own icon for the tray (Electron supplies a default if none set)
   let image;
   const iconPath = path.join(__dirname, 'assets', 'icon.png');
   if (fs.existsSync(iconPath)) image = nativeImage.createFromPath(iconPath);
   else image = nativeImage.createEmpty();
   tray = new Tray(image.isEmpty() ? nativeImage.createFromDataURL(FALLBACK_ICON) : image);
-  tray.setToolTip('Ez Phone Share');
-  const refreshMenu = () => {
-    const cfg = loadConfig();
-    const menu = Menu.buildFromTemplate([
-      { label: 'Show window', click: () => showWindow() },
-      { label: 'Open uploads folder', click: () => shell.openPath(server.getMediaDir()) },
-      { label: 'Change folder…', click: async () => {
-        const picked = await pickFolder(server.getMediaDir());
-        if (picked) {
-          server.setMediaDir(picked);
-          saveConfig({ ...loadConfig(), mediaDir: picked });
-          server.broadcast('folder-changed', { folder: picked });
-          refreshMenu();
-        }
-      } },
-      { type: 'separator' },
-      { label: `Saving to: ${truncMid(server.getMediaDir(), 48)}`, enabled: false },
-      { type: 'separator' },
-      { label: 'Quit', click: () => { isQuitting = true; app.quit(); } },
-    ]);
-    tray.setContextMenu(menu);
-  };
-  refreshMenu();
-  server.events.on('media-dir-changed', refreshMenu);
+  tray.setToolTip(APP_NAME + ' — ' + truncMid(server.getMediaDir(), 48));
+  const menu = Menu.buildFromTemplate([
+    { label: 'Check for updates…', click: () => triggerUpdateCheck() },
+    { label: 'Exit', click: () => quitApp() },
+  ]);
+  tray.setContextMenu(menu);
+  server.events.on('media-dir-changed', (dir) => tray.setToolTip(APP_NAME + ' — ' + truncMid(dir, 48)));
   tray.on('click', () => showWindow());
   tray.on('double-click', () => showWindow());
+}
+
+function quitApp() {
+  isQuitting = true;
+  app.quit();
+}
+
+function triggerUpdateCheck() {
+  if (!app.isPackaged) {
+    dialog.showMessageBox({
+      type: 'info', title: APP_NAME, message: 'Updates are checked in installed builds only.',
+      detail: 'Current version: v' + app.getVersion(), buttons: ['OK'],
+    });
+    return;
+  }
+  let resolved = false;
+  const cleanup = () => {
+    autoUpdater.off('update-not-available', onNone);
+    autoUpdater.off('update-available', onFound);
+    autoUpdater.off('error', onErr);
+  };
+  const onNone = () => { if (resolved) return; resolved = true; cleanup();
+    dialog.showMessageBox({ type: 'info', title: APP_NAME, message: 'You are up to date', detail: 'v' + app.getVersion(), buttons: ['OK'] });
+  };
+  const onFound = (info) => { if (resolved) return; resolved = true; cleanup();
+    dialog.showMessageBox({ type: 'info', title: APP_NAME, message: 'Update v' + info.version + ' is available',
+      detail: 'Downloading in the background. You will be notified when it is ready to install.', buttons: ['OK'] });
+  };
+  const onErr = (e) => { if (resolved) return; resolved = true; cleanup();
+    dialog.showMessageBox({ type: 'error', title: APP_NAME, message: 'Update check failed', detail: e.message, buttons: ['OK'] });
+  };
+  autoUpdater.on('update-not-available', onNone);
+  autoUpdater.on('update-available', onFound);
+  autoUpdater.on('error', onErr);
+  autoUpdater.checkForUpdates().catch(() => {});
 }
 
 function truncMid(s, max) {
@@ -122,10 +144,34 @@ function createWindow() {
   });
   mainWindow.loadURL(`http://localhost:${server.getPort()}/dashboard`);
   mainWindow.on('close', (e) => {
-    if (!isQuitting) {
-      e.preventDefault();
-      mainWindow.hide();
-    }
+    if (isQuitting) return; // allow real close
+
+    const cfg = loadConfig();
+    if (cfg.closeBehavior === 'minimize') { e.preventDefault(); mainWindow.hide(); return; }
+    if (cfg.closeBehavior === 'quit') { isQuitting = true; return; } // proceed to close
+
+    e.preventDefault();
+    dialog.showMessageBox(mainWindow, {
+      type: 'question',
+      title: APP_NAME,
+      message: 'Close window?',
+      detail: 'Minimize to tray to keep receiving uploads in the background, or quit the app entirely.',
+      buttons: ['Minimize to tray', 'Quit', 'Cancel'],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+      checkboxLabel: 'Always do this — don\'t ask again',
+      checkboxChecked: false,
+    }).then(({ response, checkboxChecked }) => {
+      if (response === 2) return; // cancel
+      const choice = response === 0 ? 'minimize' : 'quit';
+      if (checkboxChecked) saveConfig({ ...loadConfig(), closeBehavior: choice });
+      if (choice === 'minimize') {
+        mainWindow.hide();
+      } else {
+        quitApp();
+      }
+    }).catch(() => { /* noop */ });
   });
   mainWindow.webContents.once('did-finish-load', () => {
     // Send current version to renderer
