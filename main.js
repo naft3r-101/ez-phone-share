@@ -63,11 +63,16 @@ async function ensureMediaDir() {
 }
 
 function createTray() {
-  let image;
-  const iconPath = path.join(__dirname, 'assets', 'icon.png');
-  if (fs.existsSync(iconPath)) image = nativeImage.createFromPath(iconPath);
-  else image = nativeImage.createEmpty();
-  tray = new Tray(image.isEmpty() ? nativeImage.createFromDataURL(FALLBACK_ICON) : image);
+  let image = nativeImage.createEmpty();
+  for (const name of ['icon-16.png', 'icon-32.png', 'icon.png']) {
+    const p = path.join(__dirname, 'assets', name);
+    if (fs.existsSync(p)) {
+      image = nativeImage.createFromPath(p);
+      if (!image.isEmpty()) break;
+    }
+  }
+  if (image.isEmpty()) image = nativeImage.createFromDataURL(FALLBACK_ICON);
+  tray = new Tray(image);
   tray.setToolTip(APP_NAME + ' — ' + truncMid(server.getMediaDir(), 48));
   const menu = Menu.buildFromTemplate([
     { label: 'Check for updates…', click: () => triggerUpdateCheck() },
@@ -129,13 +134,15 @@ function showWindow() {
 }
 
 function createWindow() {
+  const winIconPath = path.join(__dirname, 'assets', 'icon.png');
   mainWindow = new BrowserWindow({
     width: 1100,
     height: 720,
     minWidth: 720,
     minHeight: 480,
-    backgroundColor: '#f5f5f7',
+    backgroundColor: '#14151a',
     title: 'Ez Phone Share',
+    icon: fs.existsSync(winIconPath) ? winIconPath : undefined,
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
