@@ -1,0 +1,12 @@
+node_modules/
+dist/
+out/
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.local
+
+# Local media uploads should never end up in source
+media/

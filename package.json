@@ -1,0 +1,58 @@
+{
+  "name": "ez-phone-share",
+  "version": "1.0.0",
+  "private": true,
+  "main": "main.js",
+  "description": "Send photos and videos from your phone to a folder on your PC",
+  "author": "naft3r",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "build": "electron-builder",
+    "build:dir": "electron-builder --dir"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.3",
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.naft3r.ezphoneshare",
+    "productName": "Ez Phone Share",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "server.js",
+      "dashboard.html",
+      "package.json",
+      "node_modules/**/*"
+    ],
+    "win": {
+      "target": "nsis",
+      "artifactName": "ez-phone-share-setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Ez Phone Share"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "naft3r-101",
+        "repo": "ez-phone-share"
+      }
+    ]
+  }
+}
