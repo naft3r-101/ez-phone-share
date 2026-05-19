@@ -122,6 +122,29 @@ function listRecent(limit = 200) {
     .slice(0, limit);
 }
 
+const BLOCKED_EXT = new Set([
+  // Windows executables / installers
+  '.exe', '.com', '.scr', '.msi', '.msp', '.mst', '.cpl', '.hta', '.pif', '.gadget', '.msc', '.application', '.appref-ms',
+  // Scripts
+  '.bat', '.cmd', '.ps1', '.psm1', '.psc1', '.vbs', '.vbe', '.wsf', '.wsh', '.js', '.jse', '.reg',
+  // Shortcuts (can point to anything)
+  '.lnk', '.url',
+  // Libraries / Java
+  '.dll', '.jar', '.jnlp', '.class',
+  // Unix executables
+  '.sh', '.bash', '.zsh', '.run', '.bin',
+]);
+
+function uploadFileFilter(_req, file, cb) {
+  const ext = path.extname(file.originalname).toLowerCase();
+  if (BLOCKED_EXT.has(ext)) {
+    const err = new Error(`File type "${ext}" is blocked for safety.`);
+    err.code = 'BLOCKED_FILE_TYPE';
+    return cb(err, false);
+  }
+  cb(null, true);
+}
+
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, mediaDir),
   filename: (_req, file, cb) => {
@@ -130,7 +153,48 @@ const storage = multer.diskStorage({
     cb(null, `${ts}-${safe}`);
   },
 });
-const upload = multer({ storage, limits: { fileSize: 500 * 1024 * 1024 } });
+const upload = multer({
+  storage,
+  fileFilter: uploadFileFilter,
+  limits: { fileSize: 500 * 1024 * 1024 },
+});
+
+// --- Per-IP rate limiting (in-memory sliding windows) ---
+const RL_REQ_WINDOW_MS = 15 * 60 * 1000;        // 15 minutes
+const RL_REQ_MAX       = 200;                    // requests per window
+const RL_BYTE_WINDOW_MS = 60 * 60 * 1000;       // 1 hour
+const RL_BYTE_MAX      = 5 * 1024 * 1024 * 1024; // 5 GB per hour
+const rateBuckets = new Map();
+
+function rateLimit(req, res, next) {
+  const ip = (req.ip || req.socket?.remoteAddress || 'unknown').replace('::ffff:', '');
+  const now = Date.now();
+  let b = rateBuckets.get(ip);
+  if (!b) {
+    b = { count: 0, bytes: 0, reqReset: now + RL_REQ_WINDOW_MS, byteReset: now + RL_BYTE_WINDOW_MS };
+    rateBuckets.set(ip, b);
+  }
+  if (now >= b.reqReset)  { b.count = 0; b.reqReset  = now + RL_REQ_WINDOW_MS; }
+  if (now >= b.byteReset) { b.bytes = 0; b.byteReset = now + RL_BYTE_WINDOW_MS; }
+  if (b.count >= RL_REQ_MAX) {
+    res.set('Retry-After', Math.ceil((b.reqReset - now) / 1000));
+    return res.status(429).json({ ok: false, error: 'Too many requests — slow down.' });
+  }
+  if (b.bytes >= RL_BYTE_MAX) {
+    res.set('Retry-After', Math.ceil((b.byteReset - now) / 1000));
+    return res.status(429).json({ ok: false, error: 'Hourly upload size limit reached.' });
+  }
+  b.count++;
+  b.bytes += Number(req.headers['content-length']) || 0;
+  next();
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, b] of rateBuckets) {
+    if (now > b.reqReset && now > b.byteReset) rateBuckets.delete(ip);
+  }
+}, 5 * 60 * 1000).unref?.();
 
 const app = express();
 app.disable('x-powered-by');
@@ -144,16 +208,24 @@ app.get('/s/:token/', requireToken, (_req, res) => {
   res.type('html').send(UPLOAD_PAGE_HTML);
 });
 
-app.post('/s/:token/upload', requireToken, upload.array('files'), (req, res) => {
-  const files = req.files || [];
-  for (const f of files) {
-    const info = fileInfo(f.filename);
-    if (info) {
-      events.emit('upload', info);
-      broadcast('upload', info);
+app.post('/s/:token/upload', requireToken, rateLimit, (req, res) => {
+  upload.array('files')(req, res, (err) => {
+    if (err) {
+      const status = err.code === 'BLOCKED_FILE_TYPE' ? 415
+                   : err.code === 'LIMIT_FILE_SIZE'   ? 413
+                   : 400;
+      return res.status(status).json({ ok: false, error: err.message });
     }
-  }
-  res.json({ ok: true, count: files.length });
+    const files = req.files || [];
+    for (const f of files) {
+      const info = fileInfo(f.filename);
+      if (info) {
+        events.emit('upload', info);
+        broadcast('upload', info);
+      }
+    }
+    res.json({ ok: true, count: files.length });
+  });
 });
 
 // Root and legacy /upload return a helpful 404 so people understand
@@ -351,7 +423,12 @@ btn.addEventListener('click', () => {
   xhr.onload = () => {
     clearBtn.disabled = false; bar.style.display = 'none';
     if (xhr.status >= 200 && xhr.status < 300) { const n = items.length; log.innerHTML = '<span class="ok">✓ Uploaded ' + n + ' file' + (n === 1 ? '' : 's') + '</span>'; clearAll(); }
-    else { btn.disabled = false; log.innerHTML = '<span class="err">Failed: ' + xhr.status + '</span>'; }
+    else {
+      btn.disabled = false;
+      let msg = 'Failed (HTTP ' + xhr.status + ')';
+      try { const j = JSON.parse(xhr.responseText); if (j && j.error) msg = j.error; } catch (e) {}
+      log.innerHTML = '<span class="err">' + esc(msg) + '</span>';
+    }
   };
   xhr.onerror = () => { btn.disabled = false; clearBtn.disabled = false; bar.style.display = 'none'; log.innerHTML = '<span class="err">Network error</span>'; };
   xhr.send(fd);
