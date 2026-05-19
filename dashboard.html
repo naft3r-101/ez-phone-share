@@ -173,21 +173,26 @@
     border-radius: 10px;
     padding: 10px 12px;
   }
-  .url-strip .url { user-select: text; }
-  .url-strip .url .tok { color: var(--amber); }
   .url-strip .label {
     font-size: 9px; letter-spacing: 0.2em; text-transform: uppercase;
     color: var(--amber-dim);
+    flex-shrink: 0;
+    align-self: flex-start;
+    margin-top: 3px;
   }
   .url-strip .url {
     flex: 1;
+    min-width: 0;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 12.5px;
+    font-size: 12px;
+    line-height: 1.45;
     color: var(--ink);
     user-select: text;
-    overflow-x: auto;
-    white-space: nowrap;
+    word-break: break-all;
+    overflow-wrap: anywhere;
   }
+  .url-strip .url .tok { color: var(--amber); }
+  .url-strip .icon-btn { flex-shrink: 0; align-self: flex-start; margin-top: 1px; }
   .icon-btn {
     background: transparent; border: 1px solid var(--line);
     color: var(--ink-muted); cursor: pointer;
