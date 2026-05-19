@@ -249,6 +249,11 @@ app.get('/api/info', localOnly, async (_req, res) => {
   try { qr = await QRCode.toString(url, { type: 'svg', margin: 1, width: 360 }); }
   catch (e) { qr = null; }
   res.json({
+    // Identity marker used by main.js's startup self-check to confirm we're
+    // talking to our own server (and not some other process that happens to
+    // share the port — see v1.0.9 release notes for the IPv4/IPv6 collision
+    // that motivated this).
+    app: 'ez-phone-share',
     url,
     folder: mediaDir,
     qrSvg: qr,
@@ -287,19 +292,27 @@ app.get('/events', localOnly, (req, res) => {
   req.on('close', () => { clearInterval(ping); sseClients.delete(res); });
 });
 
+let httpServer = null;
 function start(port) {
   return new Promise((resolve, reject) => {
     const http = require('http');
-    const server = http.createServer(app);
-    server.once('error', reject);
-    server.once('listening', () => { serverPort = port; resolve(server); });
-    // exclusive:true prevents silent co-binding on Windows (SO_EXCLUSIVEADDRUSE)
-    server.listen({ port, host: '0.0.0.0', exclusive: true });
+    httpServer = http.createServer(app);
+    httpServer.once('error', reject);
+    httpServer.once('listening', () => { serverPort = port; resolve(httpServer); });
+    httpServer.listen({ port, host: '0.0.0.0', exclusive: true });
+  });
+}
+function stop() {
+  return new Promise((resolve) => {
+    if (!httpServer) return resolve();
+    const s = httpServer; httpServer = null;
+    s.close(() => resolve());
   });
 }
 
 module.exports = {
   start,
+  stop,
   app,
   events,
   setMediaDir,

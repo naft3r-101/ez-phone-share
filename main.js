@@ -39,6 +39,21 @@ async function findFreePort(startPort, maxAttempts = 50) {
   throw new Error(`No free port in range ${startPort}-${startPort + maxAttempts - 1}`);
 }
 
+// Confirm the server we just bound is the one that responds on the port.
+// Guards against probe false-negatives and race conditions: if anything else
+// answers on this port, we know to skip it instead of trusting our bind.
+async function verifyOwnServer(port) {
+  try {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 1500);
+    const r = await fetch(`http://127.0.0.1:${port}/api/info`, { signal: ctl.signal });
+    clearTimeout(timer);
+    if (!r.ok) return false;
+    const j = await r.json();
+    return !!(j && j.app === 'ez-phone-share');
+  } catch { return false; }
+}
+
 const APP_NAME = 'Ez Phone Share';
 app.setName(APP_NAME);
 if (process.platform === 'win32') app.setAppUserModelId('com.naft3r.ezphoneshare');
@@ -274,26 +289,43 @@ if (!gotLock) {
       server.events.on('token-changed', (t) => { try { saveConfig({ ...loadConfig(), uploadToken: t }); } catch {} });
       log('upload token ready');
 
-      // Resolve a working port: env override > last-working > default, with fallback scan
+      // Resolve a working port with belt-and-suspenders:
+      //   1. probe-based: connect to candidate ports; pick the first that's free
+      //   2. self-check: after binding, fetch /api/info and verify it's OUR server
+      // (1) alone has historically been unreliable on Windows due to socket-
+      // sharing quirks across address families. (2) catches anything (1) misses.
       const desired = PORT_OVERRIDE ?? cfg.port ?? DEFAULT_PORT;
-      let actualPort;
-      try {
-        actualPort = await findFreePort(desired, 50);
-        log(`picked port ${actualPort} (desired ${desired})`);
-      } catch (e) {
-        dialog.showErrorBox('Ez Phone Share', `No free port available near ${desired}.\n\n${e.message}`);
+      let actualPort = null;
+      let nextStart = desired;
+      for (let attempt = 0; attempt < 8; attempt++) {
+        let candidate;
+        try {
+          candidate = await findFreePort(nextStart, 50);
+        } catch (e) {
+          log(`findFreePort failed: ${e.message}`);
+          break;
+        }
+        log(`attempt ${attempt}: trying port ${candidate}`);
+        try {
+          await server.start(candidate);
+        } catch (e) {
+          log(`server.start on ${candidate} failed: ${e.message}`);
+          nextStart = candidate + 1;
+          continue;
+        }
+        // Self-check: confirm OUR server is what answers on this port
+        const ok = await verifyOwnServer(candidate);
+        if (ok) { actualPort = candidate; log(`port ${candidate} verified`); break; }
+        log(`port ${candidate} self-check failed — another process is responding here`);
+        await server.stop();
+        nextStart = candidate + 1;
+      }
+      if (!actualPort) {
+        dialog.showErrorBox('Ez Phone Share', `Could not find a port that responds to our own server after 8 attempts (started searching at ${desired}). Another app may be holding ports in unusual ways. Try closing other dev servers and relaunching.`);
         app.quit();
         return;
       }
-      try {
-        await server.start(actualPort);
-        log('server started on port ' + actualPort);
-      } catch (e) {
-        log('server.start failed: ' + e.message);
-        dialog.showErrorBox('Ez Phone Share', `Could not start server on port ${actualPort}.\n\n${e.message}`);
-        app.quit();
-        return;
-      }
+      log('server verified on port ' + actualPort);
       if (!PORT_OVERRIDE && actualPort !== cfg.port) {
         saveConfig({ ...loadConfig(), port: actualPort });
       }
