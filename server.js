@@ -2,6 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const QRCode = require('qrcode');
 const EventEmitter = require('events');
+const crypto = require('crypto');
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
@@ -9,6 +10,18 @@ const fs = require('fs');
 const events = new EventEmitter();
 let mediaDir = path.join(os.tmpdir(), 'ez-phone-share');
 let serverPort = 3000;
+let uploadToken = null;
+
+function generateToken() { return crypto.randomBytes(9).toString('base64url'); }
+function setUploadToken(t) { uploadToken = t || generateToken(); events.emit('token-changed', uploadToken); return uploadToken; }
+function getUploadToken() { return uploadToken; }
+
+function requireToken(req, res, next) {
+  if (!uploadToken || req.params.token !== uploadToken) {
+    return res.status(404).type('text/plain').send('Not found');
+  }
+  next();
+}
 
 let watcher = null;
 let watchDebounce = null;
@@ -63,7 +76,8 @@ function pickLanIp(override) {
   return all.map(c => ({ ...c, score: scoreCandidate(c) })).sort((a, b) => b.score - a.score)[0].addr;
 }
 function getLanUrl() {
-  return `http://${pickLanIp(process.env.HOST)}:${serverPort}`;
+  const base = `http://${pickLanIp(process.env.HOST)}:${serverPort}`;
+  return uploadToken ? `${base}/s/${uploadToken}` : base;
 }
 
 const sseClients = new Set();
@@ -121,12 +135,16 @@ const upload = multer({ storage, limits: { fileSize: 500 * 1024 * 1024 } });
 const app = express();
 app.disable('x-powered-by');
 
-// ---------- Phone-facing upload page ----------
-app.get('/', (_req, res) => {
+// ---------- Phone-facing upload page (token-gated) ----------
+app.get('/s/:token', requireToken, (_req, res) => {
+  res.type('html').send(UPLOAD_PAGE_HTML);
+});
+// Allow trailing slash too
+app.get('/s/:token/', requireToken, (_req, res) => {
   res.type('html').send(UPLOAD_PAGE_HTML);
 });
 
-app.post('/upload', upload.array('files'), (req, res) => {
+app.post('/s/:token/upload', requireToken, upload.array('files'), (req, res) => {
   const files = req.files || [];
   for (const f of files) {
     const info = fileInfo(f.filename);
@@ -137,6 +155,12 @@ app.post('/upload', upload.array('files'), (req, res) => {
   }
   res.json({ ok: true, count: files.length });
 });
+
+// Root and legacy /upload return a helpful 404 so people understand
+app.get('/', (_req, res) => {
+  res.status(404).type('text/plain').send('Ez Phone Share: open the dashboard on the host PC to get the upload URL with a one-time token.');
+});
+app.post('/upload', (_req, res) => res.status(404).type('text/plain').send('Not found'));
 
 // ---------- Dashboard (localhost only) ----------
 app.get('/dashboard', localOnly, (_req, res) => {
@@ -162,6 +186,12 @@ app.get('/api/info', localOnly, async (_req, res) => {
 
 app.get('/api/files', localOnly, (_req, res) => {
   res.json({ folder: mediaDir, files: listRecent() });
+});
+
+app.post('/api/rotate-token', localOnly, (_req, res) => {
+  setUploadToken(generateToken());
+  broadcast('token-rotated', { url: getLanUrl() });
+  res.json({ ok: true, url: getLanUrl(), token: uploadToken });
 });
 
 app.get('/api/thumb/:name', localOnly, (req, res) => {
@@ -201,6 +231,9 @@ module.exports = {
   getMediaDir,
   getPort,
   getLanUrl,
+  setUploadToken,
+  getUploadToken,
+  generateToken,
   listCandidates,
   broadcast,
   listRecent,
@@ -311,8 +344,9 @@ btn.addEventListener('click', () => {
   for (const it of items) fd.append('files', it.file, it.file.name);
   btn.disabled = true; clearBtn.disabled = true;
   bar.style.display = 'block'; barInner.style.width = '0%'; log.innerHTML = '';
+  const base = location.pathname.replace(/\\/$/, '');
   const xhr = new XMLHttpRequest();
-  xhr.open('POST', '/upload');
+  xhr.open('POST', base + '/upload');
   xhr.upload.onprogress = (ev) => { if (ev.lengthComputable) barInner.style.width = (ev.loaded / ev.total * 100) + '%'; };
   xhr.onload = () => {
     clearBtn.disabled = false; bar.style.display = 'none';

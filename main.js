@@ -227,6 +227,13 @@ if (!gotLock) {
       log('ensured mediaDir: ' + mediaDir);
       server.setMediaDir(mediaDir);
       log('set media dir');
+      const cfg = loadConfig();
+      const token = cfg.uploadToken || server.generateToken();
+      server.setUploadToken(token);
+      if (!cfg.uploadToken) saveConfig({ ...loadConfig(), uploadToken: token });
+      // Persist any future token rotations triggered from the dashboard
+      server.events.on('token-changed', (t) => { try { saveConfig({ ...loadConfig(), uploadToken: t }); } catch {} });
+      log('upload token ready');
       try {
         await server.start(PORT);
         log('server started on port ' + PORT);

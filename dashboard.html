@@ -173,6 +173,8 @@
     border-radius: 10px;
     padding: 10px 12px;
   }
+  .url-strip .url { user-select: text; }
+  .url-strip .url .tok { color: var(--amber); }
   .url-strip .label {
     font-size: 9px; letter-spacing: 0.2em; text-transform: uppercase;
     color: var(--amber-dim);
@@ -660,6 +662,7 @@
         <span class="label">go·to</span>
         <span class="url" id="url">resolving…</span>
         <button class="icon-btn" id="copy-url" title="Copy URL">copy</button>
+        <button class="icon-btn" id="rotate-token" title="Rotate token — invalidates old QR codes">rotate</button>
       </div>
     </div>
 
@@ -884,7 +887,11 @@ function flashTile(name) {
 
 async function loadInfo() {
   const info = await api.info();
-  document.getElementById('url').textContent = info.url;
+  // Highlight the token portion of the URL so it's visually distinct
+  const urlEl = document.getElementById('url');
+  const m = /^(.*\/s\/)([^/?#]+)$/.exec(info.url);
+  if (m) urlEl.innerHTML = esc(m[1]) + '<span class="tok">' + esc(m[2]) + '</span>';
+  else urlEl.textContent = info.url;
   document.getElementById('folder').textContent = info.folder;
   currentFolder = info.folder;
   if (info.qrSvg) document.getElementById('qr').innerHTML = '<span class="pin"></span>' + info.qrSvg;
@@ -917,6 +924,7 @@ function connectSSE() {
   });
   ev.addEventListener('files-changed', () => { loadFiles(); });
   ev.addEventListener('folder-changed', () => { loadInfo(); loadFiles(); });
+  ev.addEventListener('token-rotated', () => { loadInfo(); });
   ev.onerror = () => { liveEl.classList.remove('connected'); liveText.textContent = 'reconnecting'; };
 }
 
@@ -1010,6 +1018,16 @@ document.getElementById('copy-url').addEventListener('click', async () => {
   const btn = document.getElementById('copy-url');
   const orig = btn.textContent; btn.textContent = 'copied';
   setTimeout(() => btn.textContent = orig, 1200);
+});
+document.getElementById('rotate-token').addEventListener('click', async () => {
+  const btn = document.getElementById('rotate-token');
+  const orig = btn.textContent; btn.textContent = '…';
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/rotate-token', { method: 'POST' });
+    if (r.ok) await loadInfo();
+  } catch {}
+  btn.textContent = orig; btn.disabled = false;
 });
 document.getElementById('open-folder').addEventListener('click', () => window.electronAPI?.openFolder(currentFolder));
 document.getElementById('change-folder').addEventListener('click', async () => {
