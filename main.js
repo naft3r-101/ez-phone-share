@@ -4,18 +4,31 @@ const path = require('path');
 const fs = require('fs');
 const net = require('net');
 
-function isPortFree(port) {
+// Probe a port by actually connecting to it. On Windows, bind-based probes
+// are unreliable: Node lets multiple processes co-bind the same port across
+// address families (and even within one, depending on socket options), so
+// `server.listen(...)` "succeeds" even when another process owns the port —
+// and traffic silently goes to whoever bound first. A connect attempt is
+// authoritative: ECONNREFUSED = nothing listening; success = listening.
+function isPortInUse(port, host) {
   return new Promise((resolve) => {
-    const srv = net.createServer();
-    srv.unref();
-    srv.once('error', () => resolve(false));
-    srv.once('listening', () => srv.close(() => resolve(true)));
-    try {
-      // exclusive:true → SO_EXCLUSIVEADDRUSE on Windows so we don't co-bind a
-      // port already held by another process (Node default would silently allow it)
-      srv.listen({ port, host: '0.0.0.0', exclusive: true });
-    } catch { resolve(false); }
+    const sock = new net.Socket();
+    let done = false;
+    const finish = (inUse) => { if (done) return; done = true; resolve(inUse); try { sock.destroy(); } catch {} };
+    sock.setTimeout(400);
+    sock.once('connect', () => finish(true));
+    sock.once('error',   () => finish(false));
+    sock.once('timeout', () => finish(false));
+    sock.connect({ port, host });
   });
+}
+async function isPortFree(port) {
+  // Check both loopback addresses — IPv6 :::3000 listeners are invisible to
+  // IPv4 127.0.0.1 probes and vice versa.
+  const v4InUse = await isPortInUse(port, '127.0.0.1');
+  if (v4InUse) return false;
+  const v6InUse = await isPortInUse(port, '::1');
+  return !v6InUse;
 }
 async function findFreePort(startPort, maxAttempts = 50) {
   for (let i = 0; i < maxAttempts; i++) {
@@ -174,7 +187,9 @@ function createWindow() {
       sandbox: false,
     },
   });
-  mainWindow.loadURL(`http://localhost:${server.getPort()}/dashboard`);
+  // 127.0.0.1 explicitly forces IPv4 so we hit our own server even when
+  // another process (e.g. Next.js) has the same port bound on IPv6 ::1.
+  mainWindow.loadURL(`http://127.0.0.1:${server.getPort()}/dashboard`);
   mainWindow.on('close', (e) => {
     if (isQuitting) return; // allow real close
 
