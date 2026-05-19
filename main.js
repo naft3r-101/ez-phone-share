@@ -2,6 +2,25 @@ const { app, BrowserWindow, Tray, Menu, ipcMain, dialog, shell, nativeImage } = 
 const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
+const net = require('net');
+
+function isPortFree(port) {
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.once('error', () => resolve(false));
+    srv.once('listening', () => srv.close(() => resolve(true)));
+    try { srv.listen(port, '0.0.0.0'); } catch { resolve(false); }
+  });
+}
+async function findFreePort(startPort, maxAttempts = 50) {
+  for (let i = 0; i < maxAttempts; i++) {
+    const p = startPort + i;
+    // eslint-disable-next-line no-await-in-loop
+    if (await isPortFree(p)) return p;
+  }
+  throw new Error(`No free port in range ${startPort}-${startPort + maxAttempts - 1}`);
+}
 
 const APP_NAME = 'Ez Phone Share';
 app.setName(APP_NAME);
@@ -12,7 +31,8 @@ const server = require('./server');
 autoUpdater.autoDownload = true;
 autoUpdater.autoInstallOnAppQuit = true;
 
-const PORT = Number(process.env.PORT) || 3000;
+const DEFAULT_PORT = 3000;
+const PORT_OVERRIDE = process.env.PORT ? Number(process.env.PORT) : null;
 const CONFIG_DIR = path.join(app.getPath('userData'));
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 
@@ -234,14 +254,29 @@ if (!gotLock) {
       // Persist any future token rotations triggered from the dashboard
       server.events.on('token-changed', (t) => { try { saveConfig({ ...loadConfig(), uploadToken: t }); } catch {} });
       log('upload token ready');
+
+      // Resolve a working port: env override > last-working > default, with fallback scan
+      const desired = PORT_OVERRIDE ?? cfg.port ?? DEFAULT_PORT;
+      let actualPort;
       try {
-        await server.start(PORT);
-        log('server started on port ' + PORT);
+        actualPort = await findFreePort(desired, 50);
+        log(`picked port ${actualPort} (desired ${desired})`);
       } catch (e) {
-        log('server.start failed: ' + e.message);
-        dialog.showErrorBox('Ez Phone Share', `Could not start server on port ${PORT}.\n\n${e.message}\n\nAnother copy may already be running.`);
+        dialog.showErrorBox('Ez Phone Share', `No free port available near ${desired}.\n\n${e.message}`);
         app.quit();
         return;
+      }
+      try {
+        await server.start(actualPort);
+        log('server started on port ' + actualPort);
+      } catch (e) {
+        log('server.start failed: ' + e.message);
+        dialog.showErrorBox('Ez Phone Share', `Could not start server on port ${actualPort}.\n\n${e.message}`);
+        app.quit();
+        return;
+      }
+      if (!PORT_OVERRIDE && actualPort !== cfg.port) {
+        saveConfig({ ...loadConfig(), port: actualPort });
       }
       createTray();
       log('tray created');
