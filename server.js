@@ -289,9 +289,12 @@ app.get('/events', localOnly, (req, res) => {
 
 function start(port) {
   return new Promise((resolve, reject) => {
-    serverPort = port;
-    const server = app.listen(port, '0.0.0.0', () => resolve(server));
-    server.on('error', reject);
+    const http = require('http');
+    const server = http.createServer(app);
+    server.once('error', reject);
+    server.once('listening', () => { serverPort = port; resolve(server); });
+    // exclusive:true prevents silent co-binding on Windows (SO_EXCLUSIVEADDRUSE)
+    server.listen({ port, host: '0.0.0.0', exclusive: true });
   });
 }
 

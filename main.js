@@ -10,7 +10,11 @@ function isPortFree(port) {
     srv.unref();
     srv.once('error', () => resolve(false));
     srv.once('listening', () => srv.close(() => resolve(true)));
-    try { srv.listen(port, '0.0.0.0'); } catch { resolve(false); }
+    try {
+      // exclusive:true → SO_EXCLUSIVEADDRUSE on Windows so we don't co-bind a
+      // port already held by another process (Node default would silently allow it)
+      srv.listen({ port, host: '0.0.0.0', exclusive: true });
+    } catch { resolve(false); }
   });
 }
 async function findFreePort(startPort, maxAttempts = 50) {

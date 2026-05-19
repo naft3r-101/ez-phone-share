@@ -1,6 +1,6 @@
 {
   "name": "ez-phone-share",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "private": true,
   "main": "main.js",
   "description": "Send photos and videos from your phone to a folder on your PC",
