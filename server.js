@@ -447,7 +447,14 @@ const UPLOAD_PAGE_HTML = `<!doctype html>
   .tile .meta { position: absolute; left: 0; right: 0; bottom: 0; padding: 0.25rem 0.4rem; color: white; font-size: 0.7rem; line-height: 1.15; background: linear-gradient(to top, rgba(0,0,0,0.7), rgba(0,0,0,0)); }
   .tile .meta .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .tile .rm { position: absolute; top: 4px; right: 4px; width: 22px; height: 22px; border: 0; border-radius: 50%; background: rgba(0,0,0,0.65); color: white; font-size: 14px; line-height: 1; cursor: pointer; padding: 0; display: flex; align-items: center; justify-content: center; }
-  .tile .badge { position: absolute; top: 4px; left: 4px; background: rgba(0,0,0,0.6); color: white; font-size: 0.65rem; padding: 1px 6px; border-radius: 6px; text-transform: uppercase; letter-spacing: 0.03em; }
+  .tile .st { position: absolute; top: 4px; left: 4px; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 0.7rem; font-weight: 700; line-height: 1; color: #fff; background: rgba(0,0,0,0.55); }
+  .tile[data-status="done"] .st { background: #34c759; }
+  .tile[data-status="error"] .st { background: #ff3b30; }
+  .tile[data-status="uploading"] { opacity: 0.72; }
+  .tile[data-status="error"] { outline: 2px solid #ff3b30; outline-offset: -2px; cursor: pointer; }
+  .tile .prog { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: rgba(255,255,255,0.25); }
+  .tile .prog > div { height: 100%; width: 0%; background: var(--blue); transition: width 0.15s; }
+  .tile[data-status="done"] .prog, .tile[data-status="queued"] .prog, .tile[data-status="error"] .prog { display: none; }
   .empty { margin-top: 1rem; padding: 1.2rem; border: 1px dashed var(--line); border-radius: 12px; text-align: center; color: var(--muted); font-size: 0.9rem; background: var(--card); }
   .bottom { position: fixed; left: 0; right: 0; bottom: 0; background: rgba(245,245,247,0.92); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border-top: 1px solid var(--line); padding: 0.75rem 1.25rem calc(0.75rem + env(safe-area-inset-bottom)); }
   .bottom .inner { max-width: 560px; margin: 0 auto; }
@@ -471,7 +478,7 @@ const UPLOAD_PAGE_HTML = `<!doctype html>
   <div class="row"><button type="button" id="send-text" disabled>Send text</button></div>
 </div>
 <div id="preview" class="preview"></div>
-<div id="empty" class="empty">No files selected yet. Tap one of the buttons above.</div>
+<div id="empty" class="empty">Nothing sent yet. Pick photos and they upload straight away.</div>
 <div class="bottom"><div class="inner">
   <div class="summary">
     <span id="summary">0 files</span>
@@ -499,62 +506,154 @@ const sendTextBtn = document.getElementById('send-text');
 const apiBase = location.pathname.endsWith('/') ? location.pathname.slice(0, -1) : location.pathname;
 let nextId = 1;
 const items = [];
+let pumping = false;
 function fmtSize(n) { if (n < 1024) return n + ' B'; if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB'; return (n / (1024 * 1024)).toFixed(1) + ' MB'; }
 function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function statusGlyph(st) { return st === 'done' ? '✓' : st === 'error' ? '!' : '···'; }
+
+// Tiles are built once per add/remove and then mutated in place. Rebuilding on
+// every progress tick would re-create each <img> and make the grid flicker.
+function makeTile(it) {
+  const tile = document.createElement('div');
+  tile.className = 'tile';
+  const isImg = it.file.type.startsWith('image/');
+  const isVid = it.file.type.startsWith('video/');
+  let media;
+  if (isImg) { media = document.createElement('img'); media.src = it.url; media.alt = it.file.name; }
+  else if (isVid) { media = document.createElement('video'); media.src = it.url; media.muted = true; media.playsInline = true; media.preload = 'metadata'; }
+  else { media = document.createElement('div'); media.className = 'ph'; media.textContent = '📄'; }
+  tile.appendChild(media);
+
+  const st = document.createElement('div'); st.className = 'st';
+  tile.appendChild(st);
+
+  const meta = document.createElement('div'); meta.className = 'meta';
+  const nm = document.createElement('div'); nm.className = 'name'; nm.textContent = it.file.name;
+  const sz = document.createElement('div'); sz.className = 'size';
+  sz.textContent = (isVid ? 'video • ' : '') + fmtSize(it.file.size);
+  meta.appendChild(nm); meta.appendChild(sz);
+  tile.appendChild(meta);
+
+  const prog = document.createElement('div'); prog.className = 'prog';
+  const progIn = document.createElement('div'); prog.appendChild(progIn);
+  tile.appendChild(prog);
+
+  const rm = document.createElement('button'); rm.className = 'rm'; rm.type = 'button'; rm.textContent = '×';
+  rm.addEventListener('click', (e) => { e.stopPropagation(); removeItem(it.id); });
+  tile.appendChild(rm);
+
+  // Tapping a failed tile retries just that one file.
+  tile.addEventListener('click', () => {
+    if (it.status !== 'error') return;
+    it.status = 'queued'; it.error = null; it.progress = 0;
+    paintTile(it); updateSummary(); pump();
+  });
+
+  it.el = tile; it.stEl = st; it.progEl = progIn;
+  paintTile(it);
+  return tile;
+}
+
+function paintTile(it) {
+  if (!it.el) return;
+  it.el.dataset.status = it.status;
+  it.stEl.textContent = statusGlyph(it.status);
+  it.stEl.title = it.error || '';
+  it.progEl.style.width = Math.round((it.progress || 0) * 100) + '%';
+}
+
+function updateSummary() {
+  const total = items.length;
+  const done = items.filter(x => x.status === 'done').length;
+  const failed = items.filter(x => x.status === 'error').length;
+  const busy = items.filter(x => x.status === 'queued' || x.status === 'uploading').length;
+  if (total === 0) summary.textContent = '0 files';
+  else if (busy) summary.textContent = 'Sending ' + Math.min(done + failed + 1, total) + ' of ' + total + '…';
+  else if (failed) summary.textContent = done + ' sent • ' + failed + ' failed';
+  else summary.textContent = done + ' sent';
+  btn.style.display = failed ? '' : 'none';
+  btn.disabled = !failed;
+  btn.textContent = 'Retry ' + failed + ' failed';
+  empty.style.display = total === 0 ? '' : 'none';
+  clearBtn.style.display = total === 0 ? 'none' : '';
+  bar.style.display = busy ? 'block' : 'none';
+  if (!busy) barInner.style.width = '0%';
+}
+
 function render() {
   preview.innerHTML = '';
-  for (const it of items) {
-    const tile = document.createElement('div'); tile.className = 'tile';
-    const isImg = it.file.type.startsWith('image/');
-    const isVid = it.file.type.startsWith('video/');
-    let media;
-    if (isImg) { media = document.createElement('img'); media.src = it.url; media.alt = it.file.name; }
-    else if (isVid) { media = document.createElement('video'); media.src = it.url; media.muted = true; media.playsInline = true; media.preload = 'metadata'; }
-    else { media = document.createElement('div'); media.className = 'ph'; media.textContent = '📄'; }
-    tile.appendChild(media);
-    if (isVid) { const b = document.createElement('div'); b.className = 'badge'; b.textContent = 'video'; tile.appendChild(b); }
-    const meta = document.createElement('div'); meta.className = 'meta';
-    meta.innerHTML = '<div class="name">' + esc(it.file.name) + '</div><div class="size">' + fmtSize(it.file.size) + '</div>';
-    tile.appendChild(meta);
-    const rm = document.createElement('button'); rm.className = 'rm'; rm.type = 'button'; rm.textContent = '×';
-    rm.addEventListener('click', () => removeItem(it.id));
-    tile.appendChild(rm);
-    preview.appendChild(tile);
-  }
-  const total = items.reduce((a, it) => a + it.file.size, 0);
-  summary.textContent = items.length === 0 ? '0 files' : items.length + ' file' + (items.length === 1 ? '' : 's') + ' • ' + fmtSize(total);
-  btn.disabled = items.length === 0;
-  btn.textContent = items.length === 0 ? 'Upload' : 'Upload ' + items.length + ' file' + (items.length === 1 ? '' : 's');
-  empty.style.display = items.length === 0 ? '' : 'none';
-  clearBtn.style.display = items.length === 0 ? 'none' : '';
+  for (const it of items) preview.appendChild(makeTile(it));
+  updateSummary();
 }
-function addFiles(fl) { for (const f of fl) items.push({ id: nextId++, file: f, url: URL.createObjectURL(f) }); render(); }
+
+// One file per request, one at a time. A single failure then costs you that
+// file instead of the whole batch, and each tile gets real progress.
+function uploadOne(it) {
+  return new Promise((resolve) => {
+    it.status = 'uploading'; it.progress = 0; it.error = null;
+    paintTile(it); updateSummary();
+    const fd = new FormData();
+    fd.append('files', it.file, it.file.name);
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', apiBase + '/upload');
+    xhr.upload.onprogress = (ev) => {
+      if (!ev.lengthComputable) return;
+      it.progress = ev.loaded / ev.total;
+      paintTile(it);
+      barInner.style.width = Math.round(it.progress * 100) + '%';
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) { it.status = 'done'; it.progress = 1; }
+      else {
+        it.status = 'error';
+        let msg = 'Failed (HTTP ' + xhr.status + ')';
+        try { const j = JSON.parse(xhr.responseText); if (j && j.error) msg = j.error; } catch (e) {}
+        it.error = msg;
+        log.innerHTML = '<span class="err">' + esc(msg) + '</span>';
+      }
+      paintTile(it); updateSummary(); resolve();
+    };
+    xhr.onerror = () => {
+      it.status = 'error'; it.error = 'Network error';
+      log.innerHTML = '<span class="err">Network error</span>';
+      paintTile(it); updateSummary(); resolve();
+    };
+    xhr.send(fd);
+  });
+}
+
+function pump() {
+  if (pumping) return;
+  const next = items.find(x => x.status === 'queued');
+  if (!next) {
+    updateSummary();
+    const done = items.filter(x => x.status === 'done').length;
+    const failed = items.filter(x => x.status === 'error').length;
+    if (done && !failed) log.innerHTML = '<span class="ok">✓ Sent ' + done + ' file' + (done === 1 ? '' : 's') + '</span>';
+    return;
+  }
+  pumping = true;
+  uploadOne(next).then(() => { pumping = false; pump(); });
+}
+
+function addFiles(fl) {
+  if (!fl || !fl.length) return;
+  log.innerHTML = '';
+  for (const f of fl) items.push({ id: nextId++, file: f, url: URL.createObjectURL(f), status: 'queued', progress: 0, error: null });
+  render();
+  pump();
+}
 function removeItem(id) { const i = items.findIndex(x => x.id === id); if (i < 0) return; URL.revokeObjectURL(items[i].url); items.splice(i, 1); render(); }
-function clearAll() { for (const it of items) URL.revokeObjectURL(it.url); items.length = 0; render(); }
+function clearAll() { for (const it of items) URL.revokeObjectURL(it.url); items.length = 0; log.innerHTML = ''; render(); }
 cam.addEventListener('change', () => { addFiles(cam.files); cam.value = ''; });
 lib.addEventListener('change', () => { addFiles(lib.files); lib.value = ''; });
 clearBtn.addEventListener('click', clearAll);
 btn.addEventListener('click', () => {
-  if (!items.length) return;
-  const fd = new FormData();
-  for (const it of items) fd.append('files', it.file, it.file.name);
-  btn.disabled = true; clearBtn.disabled = true;
-  bar.style.display = 'block'; barInner.style.width = '0%'; log.innerHTML = '';
-  const xhr = new XMLHttpRequest();
-  xhr.open('POST', apiBase + '/upload');
-  xhr.upload.onprogress = (ev) => { if (ev.lengthComputable) barInner.style.width = (ev.loaded / ev.total * 100) + '%'; };
-  xhr.onload = () => {
-    clearBtn.disabled = false; bar.style.display = 'none';
-    if (xhr.status >= 200 && xhr.status < 300) { const n = items.length; log.innerHTML = '<span class="ok">✓ Uploaded ' + n + ' file' + (n === 1 ? '' : 's') + '</span>'; clearAll(); }
-    else {
-      btn.disabled = false;
-      let msg = 'Failed (HTTP ' + xhr.status + ')';
-      try { const j = JSON.parse(xhr.responseText); if (j && j.error) msg = j.error; } catch (e) {}
-      log.innerHTML = '<span class="err">' + esc(msg) + '</span>';
-    }
-  };
-  xhr.onerror = () => { btn.disabled = false; clearBtn.disabled = false; bar.style.display = 'none'; log.innerHTML = '<span class="err">Network error</span>'; };
-  xhr.send(fd);
+  for (const it of items) {
+    if (it.status !== 'error') continue;
+    it.status = 'queued'; it.error = null; it.progress = 0; paintTile(it);
+  }
+  updateSummary(); pump();
 });
 function syncTextBtn() { sendTextBtn.disabled = !textEl.value.trim(); }
 textEl.addEventListener('input', syncTextBtn);
