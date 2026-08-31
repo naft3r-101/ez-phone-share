@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, ipcMain, dialog, shell, nativeImage } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, dialog, shell, nativeImage, clipboard, Notification } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
@@ -59,6 +59,7 @@ app.setName(APP_NAME);
 if (process.platform === 'win32') app.setAppUserModelId('com.naft3r.ezphoneshare');
 
 const server = require('./server');
+const mdns = require('./mdns');
 
 autoUpdater.autoDownload = true;
 autoUpdater.autoInstallOnAppQuit = true;
@@ -169,6 +170,16 @@ function triggerUpdateCheck() {
   autoUpdater.on('update-available', onFound);
   autoUpdater.on('error', onErr);
   autoUpdater.checkForUpdates().catch(() => {});
+}
+
+// Text arriving from the phone goes straight to the clipboard, which is a
+// silent change — the notification is what tells you it actually landed.
+function showTextNotification(entry) {
+  if (!Notification.isSupported()) return;
+  const preview = entry.text.length > 120 ? entry.text.slice(0, 119) + '…' : entry.text;
+  const n = new Notification({ title: 'Copied to clipboard', body: preview });
+  n.on('click', () => showWindow());
+  n.show();
 }
 
 function truncMid(s, max) {
@@ -326,6 +337,19 @@ if (!gotLock) {
         return;
       }
       log('server verified on port ' + actualPort);
+
+      // Advertise ezshare.local so a phone bookmark or home-screen icon keeps
+      // working after DHCP hands this PC a different address.
+      const lanIp = server.getLanIp();
+      log(mdns.start({ ip: lanIp, port: actualPort })
+        ? 'mDNS advertising ' + mdns.getHostname() + ' -> ' + lanIp + ':' + actualPort
+        : 'mDNS not started (no usable LAN interface)');
+
+      server.events.on('text', (entry) => {
+        try { clipboard.writeText(entry.text); }
+        catch (e) { log('clipboard write failed: ' + e.message); }
+        showTextNotification(entry);
+      });
       if (!PORT_OVERRIDE && actualPort !== cfg.port) {
         saveConfig({ ...loadConfig(), port: actualPort });
       }
@@ -347,7 +371,7 @@ if (!gotLock) {
     }
   });
 
-  app.on('before-quit', () => { isQuitting = true; });
+  app.on('before-quit', () => { isQuitting = true; mdns.stop(); });
 }
 
 // ---------- IPC: native dialogs + shell ----------

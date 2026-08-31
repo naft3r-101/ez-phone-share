@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
+const mdns = require('./mdns');
 
 const events = new EventEmitter();
 let mediaDir = path.join(os.tmpdir(), 'ez-phone-share');
@@ -75,9 +76,19 @@ function pickLanIp(override) {
   if (!all.length) return 'localhost';
   return all.map(c => ({ ...c, score: scoreCandidate(c) })).sort((a, b) => b.score - a.score)[0].addr;
 }
+function getLanIp() { return pickLanIp(process.env.HOST); }
+// Trailing slash is load-bearing: the phone page resolves its manifest and
+// icons relatively, and without it they'd resolve one level up to /s/.
 function getLanUrl() {
-  const base = `http://${pickLanIp(process.env.HOST)}:${serverPort}`;
-  return uploadToken ? `${base}/s/${uploadToken}` : base;
+  const base = `http://${getLanIp()}:${serverPort}`;
+  return uploadToken ? `${base}/s/${uploadToken}/` : base;
+}
+// Hostname form of the same link, for bookmarking — it survives the PC being
+// handed a new IP. Only works where mDNS resolves (native on iOS/macOS,
+// unreliable on Android), so the QR deliberately stays on the IP URL.
+function getStableUrl() {
+  if (!uploadToken) return null;
+  return `http://${mdns.getHostname()}:${serverPort}/s/${uploadToken}/`;
 }
 
 const sseClients = new Set();
@@ -153,17 +164,19 @@ const storage = multer.diskStorage({
     cb(null, `${ts}-${safe}`);
   },
 });
+// 500 MB was too low to be useful: a three-minute 4K phone video clears 1 GB.
+const MAX_FILE_BYTES = 4 * 1024 * 1024 * 1024;
 const upload = multer({
   storage,
   fileFilter: uploadFileFilter,
-  limits: { fileSize: 500 * 1024 * 1024 },
+  limits: { fileSize: MAX_FILE_BYTES },
 });
 
 // --- Per-IP rate limiting (in-memory sliding windows) ---
 const RL_REQ_WINDOW_MS = 15 * 60 * 1000;        // 15 minutes
 const RL_REQ_MAX       = 200;                    // requests per window
 const RL_BYTE_WINDOW_MS = 60 * 60 * 1000;       // 1 hour
-const RL_BYTE_MAX      = 5 * 1024 * 1024 * 1024; // 5 GB per hour
+const RL_BYTE_MAX      = 20 * 1024 * 1024 * 1024; // 20 GB per hour (must clear MAX_FILE_BYTES with room to spare)
 const rateBuckets = new Map();
 
 function rateLimit(req, res, next) {
@@ -196,16 +209,80 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000).unref?.();
 
+// --- Received text (phone -> PC clipboard) ---
+// Deliberately in-memory only. This is a hand-off buffer, not an archive;
+// writing a .txt per share would litter the media folder with junk.
+const TEXT_HISTORY_MAX = 20;
+const textHistory = [];
+function addText(text, source) {
+  const entry = { id: crypto.randomBytes(8).toString('hex'), text, source: source || 'phone', at: Date.now() };
+  textHistory.unshift(entry);
+  if (textHistory.length > TEXT_HISTORY_MAX) textHistory.length = TEXT_HISTORY_MAX;
+  events.emit('text', entry);
+  broadcast('text', entry);
+  return entry;
+}
+function listTexts() { return textHistory; }
+
 const app = express();
 app.disable('x-powered-by');
 
 // ---------- Phone-facing upload page (token-gated) ----------
-app.get('/s/:token', requireToken, (_req, res) => {
+// The trailing-slash form is canonical (see getLanUrl); the bare one redirects
+// so relative asset URLs in the page always resolve inside /s/:token/.
+//
+// This is deliberately ONE route rather than two. Express runs with strict
+// routing off, so '/s/:token' also matches '/s/:token/' — registering a
+// separate redirect route ahead of the page route made the canonical URL
+// redirect to itself forever.
+app.get('/s/:token', requireToken, (req, res) => {
+  if (!req.path.endsWith('/')) return res.redirect(302, `/s/${req.params.token}/`);
   res.type('html').send(UPLOAD_PAGE_HTML);
 });
-// Allow trailing slash too
-app.get('/s/:token/', requireToken, (_req, res) => {
-  res.type('html').send(UPLOAD_PAGE_HTML);
+
+// Web app manifest — gives the home-screen icon a name and a standalone
+// (no browser chrome) launch. Generated per-token so start_url/scope carry it.
+//
+// No share_target here: Android only exposes a PWA in the system share sheet
+// once it is installed, installability requires a service worker, and service
+// workers require a secure context. A LAN IP over plain HTTP is not one, so
+// share_target would be inert. That needs TLS before it can work at all.
+app.get('/s/:token/manifest.webmanifest', requireToken, (req, res) => {
+  const base = `/s/${req.params.token}/`;
+  res.type('application/manifest+json').send(JSON.stringify({
+    name: 'Ez Phone Share',
+    short_name: 'Send to PC',
+    description: 'Send photos, videos and text from this phone to your PC',
+    start_url: base,
+    scope: base,
+    display: 'standalone',
+    orientation: 'portrait',
+    background_color: '#f5f5f7',
+    theme_color: '#007aff',
+    icons: [
+      { src: 'icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+      { src: 'icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+      { src: 'icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+    ],
+  }));
+});
+
+// Home-screen icons. Fixed whitelist rather than an interpolated path, so this
+// can never be walked into an arbitrary read out of assets/.
+const PWA_ICONS = { '180': 'icon-180.png', '192': 'icon-192.png', '512': 'icon-512.png' };
+app.get('/s/:token/icon-:size.png', requireToken, (req, res) => {
+  const file = PWA_ICONS[req.params.size];
+  if (!file) return res.status(404).end();
+  res.sendFile(path.join(__dirname, 'assets', file));
+});
+
+// Text / link hand-off. Lands straight in the PC clipboard (main.js listens
+// for the 'text' event) — the common case is sending yourself a URL.
+app.post('/s/:token/text', requireToken, rateLimit, express.json({ limit: '256kb' }), (req, res) => {
+  const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+  if (!text) return res.status(400).json({ ok: false, error: 'Nothing to send.' });
+  addText(text, 'phone');
+  res.json({ ok: true });
 });
 
 app.post('/s/:token/upload', requireToken, rateLimit, (req, res) => {
@@ -255,6 +332,8 @@ app.get('/api/info', localOnly, async (_req, res) => {
     // that motivated this).
     app: 'ez-phone-share',
     url,
+    stableUrl: getStableUrl(),
+    mdnsUp: mdns.isPublished(),
     folder: mediaDir,
     qrSvg: qr,
     interfaces: listCandidates(),
@@ -263,6 +342,10 @@ app.get('/api/info', localOnly, async (_req, res) => {
 
 app.get('/api/files', localOnly, (_req, res) => {
   res.json({ folder: mediaDir, files: listRecent() });
+});
+
+app.get('/api/texts', localOnly, (_req, res) => {
+  res.json({ texts: listTexts() });
 });
 
 app.post('/api/rotate-token', localOnly, (_req, res) => {
@@ -319,6 +402,10 @@ module.exports = {
   getMediaDir,
   getPort,
   getLanUrl,
+  getLanIp,
+  getStableUrl,
+  listTexts,
+  addText,
   setUploadToken,
   getUploadToken,
   generateToken,
@@ -330,8 +417,14 @@ module.exports = {
 // ---------------- Upload page HTML (served at /) ----------------
 const UPLOAD_PAGE_HTML = `<!doctype html>
 <html><head>
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Send to PC</title>
+<meta name="theme-color" content="#007aff">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Send to PC">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <style>
   :root { --blue: #007aff; --bg: #f5f5f7; --card: #fff; --line: #e5e5ea; --muted: #6e6e73; }
   * { box-sizing: border-box; }
@@ -341,6 +434,12 @@ const UPLOAD_PAGE_HTML = `<!doctype html>
   label.drop { display: flex; align-items: center; justify-content: center; gap: 0.4rem; padding: 0.9rem 0.6rem; border: 2px dashed #b5b5bb; border-radius: 14px; cursor: pointer; background: var(--card); font-size: 0.95rem; font-weight: 500; text-align: center; }
   label.drop:active { background: #eee; }
   input[type=file] { display: none; }
+  .textcard { margin-top: 0.6rem; background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 0.6rem 0.6rem 0.5rem; }
+  .textcard textarea { width: 100%; border: 0; resize: none; font: inherit; font-size: 0.95rem; line-height: 1.35; background: transparent; color: inherit; outline: none; padding: 0.2rem 0.25rem; min-height: 2.7rem; }
+  .textcard textarea::placeholder { color: #a1a1a8; }
+  .textcard .row { display: flex; justify-content: flex-end; margin-top: 0.25rem; }
+  .textcard button { border: 0; border-radius: 10px; background: var(--blue); color: #fff; font-size: 0.85rem; font-weight: 600; padding: 0.45rem 0.9rem; cursor: pointer; }
+  .textcard button:disabled { background: #c7c7cc; }
   .preview { margin-top: 1rem; display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 0.55rem; }
   .tile { position: relative; aspect-ratio: 1 / 1; background: var(--card); border-radius: 12px; overflow: hidden; border: 1px solid var(--line); }
   .tile img, .tile video { width: 100%; height: 100%; object-fit: cover; display: block; }
@@ -367,6 +466,10 @@ const UPLOAD_PAGE_HTML = `<!doctype html>
   <label class="drop">📷 Take photo<input type="file" id="cam" accept="image/*" capture="environment" multiple></label>
   <label class="drop">🖼️ From library<input type="file" id="lib" accept="image/*,video/*" multiple></label>
 </div>
+<div class="textcard">
+  <textarea id="text" rows="2" placeholder="Or paste a link or note — goes straight to the PC clipboard"></textarea>
+  <div class="row"><button type="button" id="send-text" disabled>Send text</button></div>
+</div>
 <div id="preview" class="preview"></div>
 <div id="empty" class="empty">No files selected yet. Tap one of the buttons above.</div>
 <div class="bottom"><div class="inner">
@@ -389,6 +492,11 @@ const btn = document.getElementById('btn');
 const bar = document.getElementById('bar');
 const barInner = bar.firstElementChild;
 const log = document.getElementById('log');
+const textEl = document.getElementById('text');
+const sendTextBtn = document.getElementById('send-text');
+// Page is always served with a trailing slash (the bare form redirects here),
+// so strip it once and build endpoints off the result.
+const apiBase = location.pathname.endsWith('/') ? location.pathname.slice(0, -1) : location.pathname;
 let nextId = 1;
 const items = [];
 function fmtSize(n) { if (n < 1024) return n + ' B'; if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB'; return (n / (1024 * 1024)).toFixed(1) + ' MB'; }
@@ -432,9 +540,8 @@ btn.addEventListener('click', () => {
   for (const it of items) fd.append('files', it.file, it.file.name);
   btn.disabled = true; clearBtn.disabled = true;
   bar.style.display = 'block'; barInner.style.width = '0%'; log.innerHTML = '';
-  const base = location.pathname.replace(/\\/$/, '');
   const xhr = new XMLHttpRequest();
-  xhr.open('POST', base + '/upload');
+  xhr.open('POST', apiBase + '/upload');
   xhr.upload.onprogress = (ev) => { if (ev.lengthComputable) barInner.style.width = (ev.loaded / ev.total * 100) + '%'; };
   xhr.onload = () => {
     clearBtn.disabled = false; bar.style.display = 'none';
@@ -449,6 +556,33 @@ btn.addEventListener('click', () => {
   xhr.onerror = () => { btn.disabled = false; clearBtn.disabled = false; bar.style.display = 'none'; log.innerHTML = '<span class="err">Network error</span>'; };
   xhr.send(fd);
 });
+function syncTextBtn() { sendTextBtn.disabled = !textEl.value.trim(); }
+textEl.addEventListener('input', syncTextBtn);
+sendTextBtn.addEventListener('click', async () => {
+  const v = textEl.value.trim();
+  if (!v) return;
+  sendTextBtn.disabled = true;
+  log.innerHTML = '';
+  try {
+    const r = await fetch(apiBase + '/text', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: v }),
+    });
+    let j = {};
+    try { j = await r.json(); } catch (e) {}
+    if (r.ok && j.ok) {
+      textEl.value = '';
+      log.innerHTML = '<span class="ok">✓ Sent to PC clipboard</span>';
+    } else {
+      log.innerHTML = '<span class="err">' + esc(j.error || ('Failed (HTTP ' + r.status + ')')) + '</span>';
+    }
+  } catch (e) {
+    log.innerHTML = '<span class="err">Network error</span>';
+  }
+  syncTextBtn();
+});
+
 render();
 </script>
 </body></html>`;

@@ -205,6 +205,31 @@
   .icon-btn:hover { color: var(--ink); border-color: var(--amber-dim); background: rgba(232, 169, 72, 0.05); }
   .icon-btn:active { transform: scale(0.97); }
 
+  /* Stable hostname URL — sits under the IP URL, this is the bookmarkable one. */
+  .url-strip + .url-strip { margin-top: 6px; }
+  .stable-note { font-size: 10px; color: var(--ink-dim); margin-top: 6px; line-height: 1.5; }
+  .stable-note b { color: var(--ink-muted); font-weight: 500; }
+
+  /* Text handed over from the phone */
+  .text-list { display: flex; flex-direction: column; gap: 6px; }
+  .text-item {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 10px; padding: 8px 10px;
+    display: flex; align-items: flex-start; gap: 8px;
+  }
+  .text-item .body {
+    flex: 1; min-width: 0;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 11.5px; line-height: 1.45; color: var(--ink);
+    word-break: break-word; overflow-wrap: anywhere;
+    user-select: text;
+  }
+  .text-item .when {
+    font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--ink-dim); margin-top: 5px;
+  }
+  .text-item .icon-btn { flex-shrink: 0; }
+
   .folder-card {
     background: var(--surface);
     border: 1px solid var(--line);
@@ -667,8 +692,14 @@
         <span class="label">go·to</span>
         <span class="url" id="url">resolving…</span>
         <button class="icon-btn" id="copy-url" title="Copy URL">copy</button>
-        <button class="icon-btn" id="rotate-token" title="Rotate token — invalidates old QR codes">rotate</button>
+        <button class="icon-btn" id="rotate-token" title="Rotate token — invalidates old QR codes, bookmarks and home-screen icons">rotate</button>
       </div>
+      <div class="url-strip" id="stable-strip" style="display:none">
+        <span class="label">stable</span>
+        <span class="url" id="stable-url">—</span>
+        <button class="icon-btn" id="copy-stable" title="Copy stable URL">copy</button>
+      </div>
+      <div class="stable-note" id="stable-note"></div>
     </div>
 
     <div>
@@ -680,6 +711,11 @@
           <button class="btn ghost" id="change-folder">Change…</button>
         </div>
       </div>
+    </div>
+
+    <div id="text-section" style="display:none">
+      <div class="section-label">From your phone <span class="rule"></span></div>
+      <div class="text-list" id="text-list"></div>
     </div>
 
     <div>
@@ -759,10 +795,13 @@
 const api = {
   info:  () => fetch('/api/info').then(r => r.json()),
   files: () => fetch('/api/files').then(r => r.json()),
+  texts: () => fetch('/api/texts').then(r => r.json()),
   thumb: (name) => '/api/thumb/' + encodeURIComponent(name),
 };
 
 let allFiles = [];
+let allTexts = [];
+let stableUrlValue = '';
 let currentFilter = 'all';
 let currentFolder = '';
 let viewMode = localStorage.getItem('ezps.view') || 'grid';
@@ -894,12 +933,28 @@ async function loadInfo() {
   const info = await api.info();
   // Highlight the token portion of the URL so it's visually distinct
   const urlEl = document.getElementById('url');
-  const m = /^(.*\/s\/)([^/?#]+)$/.exec(info.url);
+  const m = /^(.*\/s\/)([^/?#]+)\/?$/.exec(info.url);
   if (m) urlEl.innerHTML = esc(m[1]) + '<span class="tok">' + esc(m[2]) + '</span>';
   else urlEl.textContent = info.url;
   document.getElementById('folder').textContent = info.folder;
   currentFolder = info.folder;
   if (info.qrSvg) document.getElementById('qr').innerHTML = '<span class="pin"></span>' + info.qrSvg;
+
+  // The .local URL is the one worth bookmarking, but it is not universally
+  // resolvable — so it is shown alongside the IP URL, never instead of it.
+  const stableStrip = document.getElementById('stable-strip');
+  const stableNote = document.getElementById('stable-note');
+  stableUrlValue = info.stableUrl || '';
+  if (info.stableUrl) {
+    stableStrip.style.display = '';
+    document.getElementById('stable-url').textContent = info.stableUrl;
+    stableNote.innerHTML = info.mdnsUp
+      ? 'Bookmark this one — it survives this PC being given a new IP. iPhone resolves it natively; Android often will not resolve <b>.local</b>, so scan the QR there.'
+      : 'Not advertising yet, so this may not resolve. The QR URL above always works.';
+  } else {
+    stableStrip.style.display = 'none';
+    stableNote.textContent = '';
+  }
 
   const net = document.getElementById('net');
   net.innerHTML = '';
@@ -908,6 +963,41 @@ async function loadInfo() {
     row.innerHTML = `<span class="k">${esc(i.name)}</span><span class="v">${esc(i.addr)}</span>`;
     net.appendChild(row);
   }
+}
+
+function renderTexts() {
+  const sec = document.getElementById('text-section');
+  const list = document.getElementById('text-list');
+  if (!allTexts.length) { sec.style.display = 'none'; list.innerHTML = ''; return; }
+  sec.style.display = '';
+  list.innerHTML = '';
+  for (const t of allTexts) {
+    const item = document.createElement('div'); item.className = 'text-item';
+    const body = document.createElement('div'); body.className = 'body';
+    // textContent, not innerHTML: this string came off the network.
+    body.textContent = t.text;
+    const when = document.createElement('div'); when.className = 'when';
+    when.textContent = fmtTime(t.at);
+    body.appendChild(when);
+    const copy = document.createElement('button');
+    copy.className = 'icon-btn'; copy.type = 'button'; copy.textContent = 'copy';
+    copy.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(t.text);
+        copy.textContent = 'copied';
+        setTimeout(() => { copy.textContent = 'copy'; }, 1200);
+      } catch (e) { /* noop */ }
+    });
+    item.appendChild(body);
+    item.appendChild(copy);
+    list.appendChild(item);
+  }
+}
+
+async function loadTexts() {
+  const data = await api.texts();
+  allTexts = data.texts || [];
+  renderTexts();
 }
 
 async function loadFiles() {
@@ -926,6 +1016,11 @@ function connectSSE() {
     allFiles = [f, ...allFiles.filter(x => x.name !== f.name)];
     renderGrid();
     setTimeout(() => flashTile(f.name), 30);
+  });
+  ev.addEventListener('text', (e) => {
+    const t = JSON.parse(e.data);
+    allTexts = [t, ...allTexts.filter(x => x.id !== t.id)].slice(0, 20);
+    renderTexts();
   });
   ev.addEventListener('files-changed', () => { loadFiles(); });
   ev.addEventListener('folder-changed', () => { loadInfo(); loadFiles(); });
@@ -1034,6 +1129,15 @@ document.getElementById('rotate-token').addEventListener('click', async () => {
   } catch {}
   btn.textContent = orig; btn.disabled = false;
 });
+document.getElementById('copy-stable').addEventListener('click', async () => {
+  if (!stableUrlValue) return;
+  const b = document.getElementById('copy-stable');
+  try {
+    await navigator.clipboard.writeText(stableUrlValue);
+    b.textContent = 'copied';
+    setTimeout(() => { b.textContent = 'copy'; }, 1200);
+  } catch (e) { /* noop */ }
+});
 document.getElementById('open-folder').addEventListener('click', () => window.electronAPI?.openFolder(currentFolder));
 document.getElementById('change-folder').addEventListener('click', async () => {
   const r = await window.electronAPI?.pickFolder(currentFolder);
@@ -1053,7 +1157,7 @@ setViewMode(viewMode);
 setGridSize(gridSize);
 
 (async () => {
-  await Promise.all([loadInfo(), loadFiles()]);
+  await Promise.all([loadInfo(), loadFiles(), loadTexts()]);
   connectSSE();
 })();
 </script>
